@@ -4,6 +4,13 @@ import torch.nn as nn
 from torchvision import transforms, models
 from PIL import Image
 from pathlib import Path
+import io
+import tempfile
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from reportlab.lib import colors
 
 st.set_page_config(
     page_title="Retina AI Screening",
@@ -47,6 +54,12 @@ if "confidence" not in st.session_state:
     st.session_state.confidence = 0.0
 if "all_probs" not in st.session_state:
     st.session_state.all_probs = []
+if "recommendation" not in st.session_state:
+    st.session_state.recommendation = ""
+if "risk_level" not in st.session_state:
+    st.session_state.risk_level = ""
+if "uploaded_image" not in st.session_state:
+    st.session_state.uploaded_image = None
 
 st.markdown("""
 <style>
@@ -228,8 +241,62 @@ def predict(image):
         confidence = float(probs[pred])
     return pred, confidence, probs
 
+def generate_pdf_report(image, pred_label, confidence, risk_level, recommendation, all_probs):
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    pdf.setFillColor(colors.black)
+    pdf.rect(0, 0, width, height, fill=1)
+
+    pdf.setFillColor(colors.HexColor("#0b3d91"))
+    pdf.setFont("Helvetica-Bold", 22)
+    pdf.drawString(40, height - 50, "Retina AI Screening Report")
+
+    pdf.setStrokeColor(colors.HexColor("#1d4ed8"))
+    pdf.line(40, height - 60, width - 40, height - 60)
+
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica", 12)
+    pdf.drawString(40, height - 90, f"Prediction Type: {pred_label}")
+    pdf.drawString(40, height - 115, f"Confidence: {confidence * 100:.2f}%")
+    pdf.drawString(40, height - 140, f"Risk Level: {risk_level}")
+    pdf.drawString(40, height - 165, f"Recommendation: {recommendation}")
+
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.setFillColor(colors.HexColor("#0b3d91"))
+    pdf.drawString(40, height - 200, "Class-wise Probabilities")
+
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica", 11)
+    y = height - 225
+    for i, p in enumerate(all_probs):
+        pdf.drawString(50, y, f"{classes[i]}: {p * 100:.2f}%")
+        y -= 18
+
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.setFillColor(colors.HexColor("#0b3d91"))
+    pdf.drawString(40, y - 10, "Uploaded Image")
+
+    img_width = 220
+    img_height = 220
+    img_y = y - 250
+
+    pil_img = image.convert("RGB")
+    img_reader = ImageReader(pil_img)
+    pdf.drawImage(img_reader, 40, img_y, width=img_width, height=img_height, preserveAspectRatio=True, mask='auto')
+
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColor(colors.white)
+    pdf.drawString(40, 30, "AI-based screening support report. Not a final medical diagnosis.")
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer
+
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
+    st.session_state.uploaded_image = image
 
     col1, col2 = st.columns([1, 1.15], gap="large")
 
@@ -251,6 +318,19 @@ if uploaded_file is not None:
             st.session_state.all_probs = probs.tolist()
             st.session_state.pred_label = "non_retina" if pred == 5 else classes[pred]
 
+            if st.session_state.pred_label == "No_DR":
+                st.session_state.risk_level = "Low Risk"
+                st.session_state.recommendation = "Maintain regular eye checkups and healthy habits."
+            elif st.session_state.pred_label in ["Mild", "Moderate"]:
+                st.session_state.risk_level = "Medium Risk"
+                st.session_state.recommendation = "Consult an eye specialist soon for further evaluation."
+            elif st.session_state.pred_label == "non_retina":
+                st.session_state.risk_level = "Invalid Image"
+                st.session_state.recommendation = "Please upload a proper retinal fundus image."
+            else:
+                st.session_state.risk_level = "High Risk"
+                st.session_state.recommendation = "Immediate medical attention is recommended."
+
         if st.session_state.prediction_done:
             pred = st.session_state.pred_index
             label = st.session_state.pred_label
@@ -263,17 +343,33 @@ if uploaded_file is not None:
                 st.markdown(f'<div class="conf-box">Confidence: {confidence * 100:.2f}%</div>', unsafe_allow_html=True)
                 st.progress(float(confidence))
 
-                if label == "No_DR":
+                if st.session_state.risk_level == "Low Risk":
                     st.markdown('<div class="risk-low">Risk Level: Low Risk</div>', unsafe_allow_html=True)
-                    recommendation = "Maintain regular eye checkups and healthy habits."
-                elif label in ["Mild", "Moderate"]:
+                elif st.session_state.risk_level == "Medium Risk":
                     st.markdown('<div class="risk-medium">Risk Level: Medium Risk</div>', unsafe_allow_html=True)
-                    recommendation = "Consult an eye specialist soon for further evaluation."
                 else:
                     st.markdown('<div class="risk-high">Risk Level: High Risk</div>', unsafe_allow_html=True)
-                    recommendation = "Immediate medical attention is recommended."
 
-                st.markdown(f'<div class="recommend-box"><b>Recommendation:</b><br>{recommendation}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="recommend-box"><b>Recommendation:</b><br>{st.session_state.recommendation}</div>',
+                    unsafe_allow_html=True
+                )
+
+                pdf_buffer = generate_pdf_report(
+                    st.session_state.uploaded_image,
+                    st.session_state.pred_label,
+                    st.session_state.confidence,
+                    st.session_state.risk_level,
+                    st.session_state.recommendation,
+                    st.session_state.all_probs
+                )
+
+                st.download_button(
+                    label="Download PDF Report",
+                    data=pdf_buffer,
+                    file_name="retina_ai_screening_report.pdf",
+                    mime="application/pdf"
+                )
 
         st.markdown('</div>', unsafe_allow_html=True)
 
