@@ -1,54 +1,11 @@
-import os
-import pandas as pd
-from PIL import Image
-from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
+import torch.optim as optim
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader, random_split
 
+data_dir = "data_processed"
 
-# --- Dataset class ---
-class DRDataset(Dataset):
-    def __init__(self, csv_file, img_dir, transform=None):
-        self.df = pd.read_csv(csv_file)
-        self.img_dir = img_dir
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        img_path = row["img_path"]                     # use precomputed path from CSV
-        label = row["diagnosis"]                        # 0–4
-        image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        return image, torch.tensor(label, dtype=torch.long)
-
-
-# --- Load full cleaned data (no df.head(800)) ---
-df = pd.read_csv("data/train_clean.csv")
-print("Full dataset size:", len(df))
-print(df.head())
-print("Columns:", df.columns.tolist())
-
-print("=> Splitting data...")
-train_df, val_df = train_test_split(
-    df,
-    test_size=0.2,
-    random_state=42,
-    stratify=df["diagnosis"]
-)
-print(f"=> Split done: train {len(train_df)}, val {len(val_df)}")
-
-train_df.to_csv("data/train_split.csv", index=False)
-val_df.to_csv("data/val_split.csv", index=False)
-print("=> Splits saved!")
-
-
-# --- Define transform ---
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -56,60 +13,56 @@ transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
+dataset = datasets.ImageFolder(data_dir, transform=transform)
+print("class_to_idx mapping:", dataset.class_to_idx)
+print("Total images:", len(dataset))
 
-# --- Create datasets and loaders (num_workers=0 for Windows) ---
-print("=> Creating dataset and loader...")
-train_ds = DRDataset("data/train_split.csv", "data/train_images", transform)
-val_ds = DRDataset("data/val_split.csv", "data/train_images", transform)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)
-val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
-print("=> Dataset and loader created!")
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
 
+device = torch.device("cpu")
+print("Using device:", device)
 
-# --- Model setup: you can keep resnet18 (fast) or switch to resnet50 (final model) ---
-model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-model.fc = nn.Linear(model.fc.in_features, 5)  # 5 classes: 0–4
-
-# If you want the final, stronger model (slower but more accurate):
-# model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-# model.fc = nn.Linear(model.fc.in_features, 5)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = models.resnet18(weights=None)
+model.fc = nn.Linear(model.fc.in_features, 6)
 model = model.to(device)
 
-
-# --- Loss and optimizer ---
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
+epochs = 3
 
-# --- Training loop (with progress every 20 batches) ---
-print("=> Starting training on FULL dataset...")
-for epoch in range(3):  # you can increase this later (e.g., 10)
+for epoch in range(epochs):
     model.train()
     running_loss = 0.0
-    print(f"Epoch {epoch+1} / 3: iterating over train_loader...")
+    correct = 0
+    total = 0
 
-    for i, (images, labels) in enumerate(train_loader):
-        if i == 0:
-            print(f"  First batch loaded: images.size = {images.size()}, labels.size = {labels.size()}")
+    print(f"\nEpoch {epoch+1}/{epochs} started")
 
+    for batch_idx, (images, labels) in enumerate(train_loader):
         images, labels = images.to(device), labels.to(device)
+
         optimizer.zero_grad()
         outputs = model(images)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
+
         running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
 
-        # Print every 20 batches to see progress
-        if (i + 1) % 20 == 0:
-            print(f"  Epoch {epoch+1}, batch {i+1}, running loss: {running_loss/(i+1):.4f}")
+        if (batch_idx + 1) % 20 == 0:
+            print(f"  Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
-    print(f"Epoch {epoch+1}, Loss: {running_loss/len(train_loader):.4f}")
+    train_acc = 100 * correct / total if total else 0
+    print(f"Epoch {epoch+1}/{epochs} completed | Avg Loss: {running_loss:.4f} | Train Acc: {train_acc:.2f}%")
 
-
-# --- Save final model ---
-torch.save(model.state_dict(), "data/dr_model.pth")
-print("Saved FINAL model to data/dr_model.pth")
+torch.save(model.state_dict(), "data/drd_6class.pth")
+print("Saved model to data/drd_6class.pth")
