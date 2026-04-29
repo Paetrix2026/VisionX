@@ -1,0 +1,7 @@
+echo data/ > .gitignore
+echo __pycache__/ >> .gitignore
+echo *.pth >> .gitignore
+echo *.zip >> .gitignore
+echo *.tar >> .gitignore
+echo *.h5 >> .gitignore
+echo *.pkl >> .gitignore
